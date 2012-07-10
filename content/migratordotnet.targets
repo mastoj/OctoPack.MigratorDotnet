@@ -1,0 +1,115 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+	<PropertyGroup>
+		<BuildDependsOn>
+			$(BuildDependsOn);
+			OctopusEstablishContext
+		</BuildDependsOn>
+	</PropertyGroup>
+	<!--
+	Configuration properties - you can override these from the command line
+	-->
+	<PropertyGroup>
+		<OctopusProjectRoot Condition="'$(OctopusProjectRoot)' == ''">$(MSBuildProjectDirectory.TrimEnd('\'))</OctopusProjectRoot>
+		<OctopusPackageConfiguration Condition="'$(OctopusPackageConfiguration)' == ''">Release</OctopusPackageConfiguration>
+		<OctopusNuSpecFileName Condition="'$(OctopusNuSpecFileName)' == ''">$(MSBuildProjectName.Replace('.csproj', '').Replace('.vbproj', '')).nuspec</OctopusNuSpecFileName>
+		<OctopusTemporaryDirectory Condition="'$(OctopusTemporaryDirectory)' == ''">$(OutputPath.TrimEnd('\'))\NuGet-temp</OctopusTemporaryDirectory>
+		<OctopusPackageVersion Condition="'$(OctopusPackageVersion)' == ''">1.0.0</OctopusPackageVersion>
+		<OctopusOutputDirectory Condition="'$(OctopusOutputDirectory)' == ''">$(OutputPath)</OctopusOutputDirectory>
+	</PropertyGroup>
+
+    <PropertyGroup>
+        <MigratorMSBuild Condition=" '$(MigratorMSBuild)' == '' ">$(MSBuildProjectDirectory)\lib\Migrator.MSBuild.dll</MigratorMSBuild>
+<!--        <ConnectionString Condition="'$(ConnectionString)' == ''">Database=Octopus_Local;Data Source=localhost;Integrated Security=SSPI</ConnectionString>-->
+    </PropertyGroup>
+
+  <!-- 
+  Establsh Context
+  This target figures out whether this is a web project or normal application, and whether it is being built in release mode. 
+  It then discovers the location of NuGet.exe.
+  -->
+	<Target Name="OctopusEstablishContext">
+		<PropertyGroup>
+			<OctopusContextIsReleaseBuild Condition="'$(OctopusPackageConfiguration)' == '$(Configuration)'">True</OctopusContextIsReleaseBuild>
+		</PropertyGroup>
+
+		<Message Text="IsReleaseBuild: $(OctopusContextIsReleaseBuild)" />
+		<Message Text="This is not a $(OctopusPackageConfiguration) build, so any Octopus packaging will be skipped" Importance="High" Condition="'$(OctopusContextIsReleaseBuild)' != 'True'" />
+		<Message Text="OctopusProjectRoot:  $(OctopusProjectRoot)" />
+		<Message Text="OctopusNuGetExePath: $(OctopusNuGetExePath)" />
+
+		<CallTarget Targets="OctopusPackageMigratorDotnet" Condition="'$(OctopusContextIsReleaseBuild)' == 'True'" />
+	</Target>
+
+    
+	<UsingTask AssemblyFile="$(MigratorMSBuild)" TaskName="Migrator.MSBuild.Migrate"/> 
+
+	<Target Name="BuildAndMigrate" DependsOnTargets="Build; Migrate" />
+	
+    <Target Name="Migrate">
+        <CreateProperty Value="-1"  Condition="'$(MigrationNumber)'==''">
+           <Output TaskParameter="Value" PropertyName="MigrationNumber"/>
+        </CreateProperty>
+        <CreateProperty Value="$(OutputPath)$(AssemblyName).dll"  Condition="'$(Migration)'==''">
+           <Output TaskParameter="Value" PropertyName="Migration"/>
+        </CreateProperty>
+        <Message Text="Migrating to: $(MigrationNumber)"/>
+        <Message Text="Migration: $(Migration)"/>
+        <Migrate Provider="SqlServer"
+            Connectionstring="$(ConnectionString)"
+            Migrations="$(Migration)"
+            To="$(MigrationNumber)"/>
+    </Target>
+
+	<Target Name="OctopusFindNuGetSettings">
+		<Error
+			Code="OCTO: 1001"
+			Text="OctoPack: Expected to find a NuGet spec file named $(OctopusNuSpecFileName) under $(MSBuildProjectDirectory). You can fix this error by adding a NuGet spec file with that name, or override the name of the file by setting a property called OctopusNuSpecFileName in your project."
+			Condition="!Exists('$(OctopusNuSpecFileName)')"
+		/>
+      
+		<ItemGroup>
+			<FindNuGet Include="$(OctopusNuGetExePath)" />
+			<FindNuGet Include="$(MSBuildThisFileDirectory)..\tools\NuGet.exe" />
+			<FindNuGet Include="$(OctopusProjectRoot)\packages\OctoPack*\tools\NuGet.exe" />
+			<FindNuGet Include="$(OctopusProjectRoot)\.nuget\NuGet*.exe" />
+			<FindNuGet Include="$(OctopusProjectRoot)\..\packages\OctoPack*\tools\NuGet.exe" />
+			<FindNuGet Include="$(OctopusProjectRoot)\..\.nuget\NuGet*.exe" />
+			<FindNuGet Include="$(OctopusProjectRoot)\..\..\packages\OctoPack*\tools\NuGet.exe" />
+			<FindNuGet Include="$(OctopusProjectRoot)\..\..\.nuget\NuGet*.exe" />
+		</ItemGroup>
+    
+		<PropertyGroup>        
+			<NuGetExe Condition="'$(OctopusNuGetExePath)' == ''">%(FindNuGet.Identity)</NuGetExe>
+			<NuGetExe Condition="'$(OctopusNuGetExePath)' != ''">$(OctopusNuGetExePath)</NuGetExe>
+		</PropertyGroup>
+
+		<Error
+			Code="OCTO: 1002"
+			Text="OctoPack: Could not locate NuGet.exe. Please add a NuGet package reference for NuGet.CommandLine, or set the property OctopusNuGetExePath in your project. Current search path is: $(NuGetExe)"
+			Condition="!Exists('$(NuGetExe)')"
+		/>
+
+		<Message Importance="High" Text="NuGet.exe found: $(NuGetExe)"/>
+	</Target>
+	
+	<Target Name="OctopusPackageMigratorDotnet" DependsOnTargets="OctopusFindNuGetSettings">
+		<RemoveDir Directories="$(OctopusTemporaryDirectory)" ContinueOnError="true" />
+		<MakeDir Directories="$(OctopusTemporaryDirectory)" />
+		<ItemGroup>
+			<ContentToPackage Include="$(OutputPath)\**\*" Exclude="*.nupkg" />
+			<ContentToPackage Include="$(OutDir)\**\*" Exclude="*.nupkg" />
+		</ItemGroup>
+		<Copy 
+			SourceFiles="@(ContentToPackage)"
+			DestinationFiles="@(ContentToPackage->'$(OctopusTemporaryDirectory)\%(RecursiveDir)%(Filename)%(Extension)')"
+		/>
+		<Copy SourceFiles="$(OctopusNuSpecFileName)" DestinationFolder="$(OctopusTemporaryDirectory)" />
+		<MakeDir Directories="$(OctopusOutputDirectory.TrimEnd(&quot;\&quot;))"/>
+		<Exec Command='"$(NuGetExe)" pack "$(OctopusTemporaryDirectory)\$(OctopusNuSpecFileName)" -OutputDirectory "$(OctopusOutputDirectory.TrimEnd(&quot;\&quot;))" -basePath "$(OctopusTemporaryDirectory)" -Version "$(OctopusPackageVersion)" -NoPackageAnalysis' />    
+		<ItemGroup>
+			<PackagesBuilt Include="$(OctopusOutputDirectory.TrimEnd(&quot;\&quot;))\*.nupkg" />
+		</ItemGroup>
+		<Message Importance="High" Text="Copy packages: @(PackagesBuilt) to $(OutDir)"/>
+		<Copy SourceFiles="@(PackagesBuilt)" DestinationFolder="$(OutDir)" /> 
+	</Target>
+</Project>
